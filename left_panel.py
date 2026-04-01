@@ -119,6 +119,11 @@ class RuleRow(QWidget):
 
         self.setFixedHeight(38)
 
+    def mousePressEvent(self, event):
+        """點選規則列任意位置都觸發聚焦。"""
+        self.rule_focused.emit(self.rule.id)
+        super().mousePressEvent(event)
+
     # ---------- slots ----------
 
     def _on_re(self, v):
@@ -236,6 +241,21 @@ class LeftPanel(QWidget):
         sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet("color:#3A3A3A;")
         main.addWidget(sep)
+
+        # 批次勾選控制
+        r0 = QHBoxLayout()
+        btn_all  = QPushButton("全部啟用")
+        btn_none = QPushButton("全部取消")
+        btn_inv  = QPushButton("反向勾選")
+        for b in (btn_all, btn_none, btn_inv):
+            b.setFixedHeight(24)
+        btn_all.clicked.connect(self._enable_all)
+        btn_none.clicked.connect(self._disable_all)
+        btn_inv.clicked.connect(self._invert_all)
+        r0.addWidget(btn_all)
+        r0.addWidget(btn_none)
+        r0.addWidget(btn_inv)
+        main.addLayout(r0)
 
         # 按鈕區
         r1 = QHBoxLayout()
@@ -355,6 +375,20 @@ class LeftPanel(QWidget):
             imported += 1
 
         QMessageBox.information(self, "完成", f"已匯入 {imported} 條規則。")
+
+    # ── 批次勾選 ──────────────────────────────
+
+    def _enable_all(self):
+        for row in self.rows.values():
+            row.enable_cb.setChecked(True)
+
+    def _disable_all(self):
+        for row in self.rows.values():
+            row.enable_cb.setChecked(False)
+
+    def _invert_all(self):
+        for row in self.rows.values():
+            row.enable_cb.setChecked(not row.enable_cb.isChecked())
 
     # ── 外部介面 ──────────────────────────────
 
