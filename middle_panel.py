@@ -154,7 +154,8 @@ class MiddlePanel(QWidget):
         self.case_sensitive: bool = True
         self.filter_mode: bool = False
         self._scanner: Optional[FileScannerThread] = None
-        self._scan_gen: int = 0   # 世代計數器，舊執行緒的 signal 用此過濾
+        self._scan_gen: int = 0          # 世代計數器，舊執行緒的 signal 用此過濾
+        self._dying_scanners: list = []  # 暫存仍在跑的舊執行緒，防止 GC 提早銷毀
         self._build()
 
     # ── 建構 UI ───────────────────────────────
@@ -270,23 +271,34 @@ class MiddlePanel(QWidget):
     # ── 掃描 ──────────────────────────────────
 
     def _start_scan(self):
-        # ① 先遞增世代，讓所有舊執行緒的 signal 在抵達 slot 時被忽略
+        # ① 遞增世代計數，後續所有 guarded lambda 只接受本次世代的結果
         self._scan_gen += 1
         gen = self._scan_gen
 
-        # ② 通知舊執行緒取消（非同步），不阻塞 UI
-        if self._scanner and self._scanner.isRunning():
+        # ② 處理舊執行緒
+        if self._scanner is not None and self._scanner.isRunning():
+            # 先斷開所有 signal，讓事件佇列中殘留的訊號無法觸發 slot
+            for sig in (self._scanner.file_found,
+                        self._scanner.scan_complete,
+                        self._scanner.scan_progress,
+                        self._scanner.scan_error):
+                try:
+                    sig.disconnect()
+                except RuntimeError:
+                    pass
             self._scanner.cancel()
-            # 斷開舊 scanner 的 signal，避免 Qt 事件佇列中殘留的訊號被接收
-            try:
-                self._scanner.file_found.disconnect()
-                self._scanner.scan_complete.disconnect()
-                self._scanner.scan_progress.disconnect()
-                self._scanner.scan_error.disconnect()
-            except RuntimeError:
-                pass
 
-        # ③ 清空清單（此時舊 scanner 的 signal 已斷開，不會再填入資料）
+            # ★ 關鍵：把舊執行緒物件放入暫存清單，防止 Python GC 在執行緒
+            #   真正結束前就銷毀它（→ "QThread destroyed while running" crash）。
+            #   當執行緒自然結束時，finished 訊號觸發，才把它從清單移除。
+            dying = self._scanner
+            self._dying_scanners.append(dying)
+            dying.finished.connect(
+                lambda s=dying: self._dying_scanners.remove(s)
+                if s in self._dying_scanners else None
+            )
+
+        # ③ 清空清單（此時舊 scanner 訊號已斷開，不會再填入資料）
         self.list_widget.clear()
         self.items.clear()
         self.progress.setVisible(True)
@@ -300,7 +312,7 @@ class MiddlePanel(QWidget):
             self.case_sensitive,
         )
 
-        # ⑤ 用 lambda 包裝世代檢查：只有本次世代的結果才會被接受
+        # ⑤ 用世代快照包裝 slot：只有本次世代的結果才會被接受
         def _guarded_file_found(info, _gen=gen):
             if self._scan_gen == _gen:
                 self._on_file_found(info)
