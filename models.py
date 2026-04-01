@@ -2,6 +2,7 @@
 models.py — 資料模型定義
 Rule、MatchInfo、ChangeRecord
 """
+# v1.0.0
 import re
 import uuid
 from dataclasses import dataclass, field
