@@ -154,6 +154,7 @@ class MiddlePanel(QWidget):
         self.case_sensitive: bool = True
         self.filter_mode: bool = False
         self._scanner: Optional[FileScannerThread] = None
+        self._scan_gen: int = 0   # 世代計數器，舊執行緒的 signal 用此過濾
         self._build()
 
     # ── 建構 UI ───────────────────────────────
@@ -269,29 +270,57 @@ class MiddlePanel(QWidget):
     # ── 掃描 ──────────────────────────────────
 
     def _start_scan(self):
+        # ① 先遞增世代，讓所有舊執行緒的 signal 在抵達 slot 時被忽略
+        self._scan_gen += 1
+        gen = self._scan_gen
+
+        # ② 通知舊執行緒取消（非同步），不阻塞 UI
         if self._scanner and self._scanner.isRunning():
             self._scanner.cancel()
-            self._scanner.wait(500)
+            # 斷開舊 scanner 的 signal，避免 Qt 事件佇列中殘留的訊號被接收
+            try:
+                self._scanner.file_found.disconnect()
+                self._scanner.scan_complete.disconnect()
+                self._scanner.scan_progress.disconnect()
+                self._scanner.scan_error.disconnect()
+            except RuntimeError:
+                pass
 
+        # ③ 清空清單（此時舊 scanner 的 signal 已斷開，不會再填入資料）
         self.list_widget.clear()
         self.items.clear()
         self.progress.setVisible(True)
         self.status_lbl.setText("掃描中…")
 
+        # ④ 建立新 scanner
         self._scanner = FileScannerThread(
             self.work_dir,
             self.selected_exts,
             self.rules,
             self.case_sensitive,
         )
-        self._scanner.file_found.connect(self._on_file_found)
-        self._scanner.scan_complete.connect(self._on_scan_done)
-        self._scanner.scan_progress.connect(
-            lambda msg: self.status_lbl.setText(f"掃描：{msg}")
-        )
-        self._scanner.scan_error.connect(
-            lambda msg: self.status_lbl.setText(f"錯誤：{msg}")
-        )
+
+        # ⑤ 用 lambda 包裝世代檢查：只有本次世代的結果才會被接受
+        def _guarded_file_found(info, _gen=gen):
+            if self._scan_gen == _gen:
+                self._on_file_found(info)
+
+        def _guarded_done(count, _gen=gen):
+            if self._scan_gen == _gen:
+                self._on_scan_done(count)
+
+        def _guarded_progress(msg, _gen=gen):
+            if self._scan_gen == _gen:
+                self.status_lbl.setText(f"掃描：{msg}")
+
+        def _guarded_error(msg, _gen=gen):
+            if self._scan_gen == _gen:
+                self.status_lbl.setText(f"錯誤：{msg}")
+
+        self._scanner.file_found.connect(_guarded_file_found)
+        self._scanner.scan_complete.connect(_guarded_done)
+        self._scanner.scan_progress.connect(_guarded_progress)
+        self._scanner.scan_error.connect(_guarded_error)
         self._scanner.start()
 
     def _on_file_found(self, info: dict):
